@@ -23,8 +23,12 @@ function renderLogin(){
       <select id="login-user">${options}</select>
       <label>Password</label>
       <input type="password" id="login-pass" placeholder="Enter password">
+      <label class="checkbox-row" style="display:flex; align-items:center; gap:8px; margin:10px 0 0; cursor:pointer;">
+        <input type="checkbox" id="login-remember" checked style="width:auto; margin:0;">
+        <span style="font-size:13px; color:var(--muted);">Keep me logged in</span>
+      </label>
       <div class="error" id="login-error" style="display:none;"></div>
-      <button class="btn-primary" id="login-btn">Sign In</button>
+      <button class="btn-primary" id="login-btn" style="margin-top:14px;">Sign In</button>
     </div>
     <div class="foot-note">First time signing in? Your password is <b style="color:var(--accent)">Msvilla@202</b> — change it after logging in.</div>
     <div class="foot-note" style="margin-top:6px;">Or <span data-nav="phoneLogin" style="color:var(--accent); cursor:pointer;">sign in with your mobile number (OTP)</span>.</div>
@@ -36,6 +40,7 @@ function renderLogin(){
     const member = state.members.find(m=>m.username===u);
     if(member && member.password===p){
       state.session = { username: u };
+      if($("#login-remember").checked){ rememberSession(u); } else { forgetSession(); }
       state.view = "home";
       render();
       askToEnableNotifications();
@@ -65,7 +70,11 @@ function renderPhoneLogin(){
       <div id="otp-verify-block" style="display:none; margin-top:16px;">
         <label>Enter the 6-digit code</label>
         <div class="otp-box"><input type="text" id="otp-code" maxlength="6"></div>
-        <button class="btn-primary" id="otp-verify">Verify &amp; Sign In</button>
+        <label class="checkbox-row" style="display:flex; align-items:center; gap:8px; margin:10px 0 0; cursor:pointer;">
+          <input type="checkbox" id="otp-remember" checked style="width:auto; margin:0;">
+          <span style="font-size:13px; color:var(--muted);">Keep me logged in</span>
+        </label>
+        <button class="btn-primary" id="otp-verify" style="margin-top:14px;">Verify &amp; Sign In</button>
       </div>
     </div>
     <div class="foot-note">Prefer a password? <span data-nav="login" style="color:var(--accent); cursor:pointer;">Sign in with username</span></div>
@@ -90,6 +99,7 @@ function renderPhoneLogin(){
     if(!p || Date.now() > p.expiresAt){ err.style.display="block"; err.textContent="Code expired. Send a new one."; return; }
     if(entered !== p.code){ err.style.display="block"; err.textContent="That code doesn't match."; return; }
     state.session = { username: p.username };
+    if($("#otp-remember").checked){ rememberSession(p.username); } else { forgetSession(); }
     state.pendingOtp = null;
     state.view = "home";
     render();

@@ -21,8 +21,27 @@ function render(){
     }catch(e){}
     lastPushedView = state.view;
   }
+  saveViewState();
   renderView();
   renderChatFab();
+}
+
+// Remembers which screen the person was on so a page refresh (or reopening
+// the PWA) lands back where they were instead of bouncing to Login. Only
+// meaningful alongside "keep me logged in" — if there's no remembered
+// session, init() always shows Login regardless of what's saved here.
+const LAST_VIEW_KEY = "ms-villa:last-view";
+function saveViewState(){
+  try{
+    if(state.view==="login" || state.view==="phoneLogin"){ localStorage.removeItem(LAST_VIEW_KEY); return; }
+    localStorage.setItem(LAST_VIEW_KEY, JSON.stringify({ view: state.view, roomId: state.roomId }));
+  }catch(e){}
+}
+function getSavedViewState(){
+  try{
+    const v = localStorage.getItem(LAST_VIEW_KEY);
+    return v ? JSON.parse(v) : null;
+  }catch(e){ return null; }
 }
 
 window.addEventListener("popstate", (e)=>{
@@ -33,6 +52,7 @@ window.addEventListener("popstate", (e)=>{
     state.view = state.session ? "home" : "login";
   }
   lastPushedView = state.view;
+  saveViewState();
   renderView();
   renderChatFab();
 });
@@ -398,10 +418,13 @@ function renderDailyExpenses(){
     const dayTotal = sumDailyExpenses(entries);
     const rows = entries.map(e=>`
       <div class="member-row">
-        <div class="left"><div>
-          <div class="name">${e.note || "Expense"}</div>
-          <div class="tag">${e.addedBy ? "Added by " + nameFor(e.addedBy, state.members) : ""}</div>
-        </div></div>
+        <div class="left">
+          ${e.photo ? `<img class="avatar" src="${e.photo}" data-view-photo="${e.id}" style="cursor:pointer;">` : ""}
+          <div>
+            <div class="name">${e.note || "Expense"}</div>
+            <div class="tag">${e.addedBy ? "Added by " + nameFor(e.addedBy, state.members) : ""}</div>
+          </div>
+        </div>
         <div class="tag" style="font-size:14px; font-weight:700; color:var(--ink);">${inr(Number(e.amount)||0)}</div>
       </div>
     `).join("");
@@ -438,6 +461,28 @@ function renderDailyExpenses(){
     <div class="foot-note" style="padding:4px 18px 0;">Everyone in the house can add, edit, or remove entries here.</div>
   `;
   $("#add-daily-expense").onclick = ()=> openEditDailyExpensesModal();
+  app.querySelectorAll("[data-view-photo]").forEach(el=>{
+    el.onclick = ()=>{
+      const id = el.getAttribute("data-view-photo");
+      const entry = (state.dailyExpenses||[]).find(e=>e.id===id);
+      if(entry && entry.photo) openPhotoLightbox(entry.photo);
+    };
+  });
+}
+
+// Simple full-screen preview for a stored receipt/complaint photo.
+function openPhotoLightbox(src){
+  const wrap = document.createElement("div");
+  wrap.className = "modal-bg";
+  wrap.innerHTML = `
+    <div class="modal" style="padding:10px; text-align:center;">
+      <img src="${src}" style="max-width:100%; max-height:70vh; border-radius:8px;">
+      <button class="btn-ghost" id="photo-close" style="margin-top:12px;">Close</button>
+    </div>
+  `;
+  document.body.appendChild(wrap);
+  wrap.onclick = (e)=>{ if(e.target===wrap) wrap.remove(); };
+  wrap.querySelector("#photo-close").onclick = ()=> wrap.remove();
 }
 
 // Open to every signed-in member (unlike the Room Expenses ledger, which
@@ -455,7 +500,13 @@ function openEditDailyExpensesModal(){
         <input type="text" class="de-date" data-i="${i}" value="${e.date||''}" placeholder="YYYY-MM-DD" style="width:130px; margin-bottom:0;" onfocus="(this.type='date')">
         <input type="text" inputmode="numeric" class="de-amount" data-i="${i}" value="${e.amount||''}" placeholder="Amount" style="width:90px; margin-bottom:0;">
         <input type="text" class="de-note" data-i="${i}" value="${e.note||''}" placeholder="What was it for?" style="flex:1 1 100%; margin-bottom:0;">
-        <span data-remove-exp="${i}" style="color:var(--danger); font-size:12px; cursor:pointer;">Remove</span>
+        <div style="display:flex; align-items:center; gap:8px; flex:1 1 100%;">
+          ${e.photo ? `<img class="avatar" src="${e.photo}" style="width:36px; height:36px;">` : ""}
+          <input type="file" accept="image/*" capture="environment" class="de-photo-file" data-i="${i}" style="display:none;">
+          <span data-add-photo="${i}" style="color:var(--accent); font-size:12px; cursor:pointer;">${e.photo ? "Change photo" : "Add photo"}</span>
+          ${e.photo ? `<span data-remove-photo="${i}" style="color:var(--danger); font-size:12px; cursor:pointer;">Remove photo</span>` : ""}
+          <span data-remove-exp="${i}" style="color:var(--danger); font-size:12px; cursor:pointer; margin-left:auto;">Remove entry</span>
+        </div>
       </div>
     `;
   }
@@ -480,12 +531,32 @@ function openEditDailyExpensesModal(){
         date: todayKey(),
         amount: 0,
         note: "",
+        photo: null,
         addedBy: state.session.username
       });
       renderModal();
     };
     wrap.querySelectorAll("[data-remove-exp]").forEach(el=>{
       el.onclick = ()=>{ draft.splice(parseInt(el.getAttribute("data-remove-exp"),10),1); renderModal(); };
+    });
+    wrap.querySelectorAll("[data-remove-photo]").forEach(el=>{
+      el.onclick = ()=>{ draft[parseInt(el.getAttribute("data-remove-photo"),10)].photo = null; renderModal(); };
+    });
+    wrap.querySelectorAll("[data-add-photo]").forEach(el=>{
+      el.onclick = ()=>{
+        const i = el.getAttribute("data-add-photo");
+        wrap.querySelector(`.de-photo-file[data-i="${i}"]`).click();
+      };
+    });
+    wrap.querySelectorAll(".de-photo-file").forEach(fileInput=>{
+      fileInput.onchange = ()=>{
+        const f = fileInput.files[0];
+        if(!f) return;
+        const i = parseInt(fileInput.getAttribute("data-i"),10);
+        const reader = new FileReader();
+        reader.onload = ()=>{ draft[i].photo = reader.result; renderModal(); };
+        reader.readAsDataURL(f);
+      };
     });
 
     wrap.querySelector("#de-save").onclick = async ()=>{
@@ -544,6 +615,7 @@ function renderComplaints(){
         <span class="status-pill ${c.status==='closed'?'status-closed':'status-open'}">${c.status==='closed'?'Resolved':'Open'}</span>
       </div>
       <div class="desc">${c.description}</div>
+      ${c.photo ? `<img src="${c.photo}" data-view-photo="${c.id}" style="width:100%; max-width:220px; border-radius:8px; margin-top:8px; cursor:pointer; display:block;">` : ""}
       <div class="meta">${nameFor(c.username, state.members)} · ${new Date(c.createdAt).toLocaleDateString()} ${c.status!=='closed' && me.admin ? `<span data-close="${c.id}" style="color:var(--accent); cursor:pointer; margin-left:8px;">Mark resolved</span>` : ""}</div>
     </div>
   `).join("") || `<div class="foot-note" style="padding:20px 0;">No complaints raised yet.</div>`;
@@ -568,12 +640,20 @@ function renderComplaints(){
       if(c){ c.status="closed"; await sset("ms-villa:complaints", state.complaints); renderComplaints(); }
     };
   });
+  app.querySelectorAll("[data-view-photo]").forEach(el=>{
+    el.onclick = ()=>{
+      const id = el.getAttribute("data-view-photo");
+      const c = state.complaints.find(x=>x.id===id);
+      if(c && c.photo) openPhotoLightbox(c.photo);
+    };
+  });
 }
 
 function openComplaintModal(){
   const cats = COMPLAINT_CATEGORIES.map(c=>`<option value="${c}">${c}</option>`).join("");
   const wrap = document.createElement("div");
   wrap.className = "modal-bg";
+  let photoData = null;
   wrap.innerHTML = `
     <div class="modal">
       <h3>New Complaint</h3>
@@ -581,12 +661,41 @@ function openComplaintModal(){
       <select id="c-cat">${cats}</select>
       <label>Describe the issue</label>
       <textarea id="c-desc" placeholder="e.g. Washing machine drum not spinning, making loud noise"></textarea>
+      <label>Photo (optional)</label>
+      <div style="display:flex; align-items:center; gap:10px;">
+        <input type="file" accept="image/*" capture="environment" id="c-photo-file" style="display:none;">
+        <button type="button" class="btn-ghost" id="c-photo-btn" style="margin:0;">Add Photo</button>
+        <img id="c-photo-preview" style="display:none; width:48px; height:48px; object-fit:cover; border-radius:8px;">
+        <span id="c-photo-remove" style="display:none; color:var(--danger); font-size:12px; cursor:pointer;">Remove</span>
+      </div>
       <div class="error" id="c-err" style="display:none;"></div>
-      <button class="btn-primary" id="c-save">Submit Complaint</button>
+      <button class="btn-primary" id="c-save" style="margin-top:14px;">Submit Complaint</button>
       <button class="btn-ghost" id="c-cancel">Cancel</button>
     </div>
   `;
   document.body.appendChild(wrap);
+  const fileInput = wrap.querySelector("#c-photo-file");
+  const preview = wrap.querySelector("#c-photo-preview");
+  const removeBtn = wrap.querySelector("#c-photo-remove");
+  wrap.querySelector("#c-photo-btn").onclick = ()=> fileInput.click();
+  fileInput.onchange = ()=>{
+    const f = fileInput.files[0];
+    if(!f) return;
+    const reader = new FileReader();
+    reader.onload = ()=>{
+      photoData = reader.result;
+      preview.src = photoData;
+      preview.style.display = "block";
+      removeBtn.style.display = "inline";
+    };
+    reader.readAsDataURL(f);
+  };
+  removeBtn.onclick = ()=>{
+    photoData = null;
+    fileInput.value = "";
+    preview.style.display = "none";
+    removeBtn.style.display = "none";
+  };
   wrap.querySelector("#c-cancel").onclick = ()=> wrap.remove();
   wrap.querySelector("#c-save").onclick = async ()=>{
     const desc = wrap.querySelector("#c-desc").value.trim();
@@ -597,6 +706,7 @@ function openComplaintModal(){
       username: state.session.username,
       category: wrap.querySelector("#c-cat").value,
       description: desc,
+      photo: photoData,
       status: "open",
       createdAt: new Date().toISOString()
     };
@@ -750,7 +860,7 @@ function renderSettings(){
     <div class="nav-row"><button class="btn-ghost" id="logout">Sign Out</button></div>
   `;
   $("#go-changepass").onclick = ()=>{ state.view="changepass"; render(); };
-  $("#logout").onclick = ()=>{ state.session=null; state.view="login"; render(); };
+  $("#logout").onclick = ()=>{ state.session=null; forgetSession(); localStorage.removeItem(LAST_VIEW_KEY); state.view="login"; render(); };
   $("#toggle-notif").onclick = async ()=>{
     if(notificationsEnabled()){ await unsubscribeFromPush(); } else { await subscribeToPush(); }
     renderSettings();
@@ -826,6 +936,18 @@ window.addEventListener("online", syncNow);
 
 (async function init(){
   await loadCore();
+  const remembered = getRememberedSession();
+  if(remembered && state.members.some(m=>m.username===remembered.username)){
+    state.session = { username: remembered.username };
+    const saved = getSavedViewState();
+    const validViews = ["home","room","instructions","settings","changepass","duty","expenses","dailyExpenses","rent","complaints","meetings"];
+    if(saved && validViews.includes(saved.view) && (saved.view!=="room" || state.rooms.some(r=>r.id===saved.roomId))){
+      state.view = saved.view;
+      state.roomId = saved.roomId || null;
+    } else {
+      state.view = "home";
+    }
+  }
   render();
   initNotifications();
 })();

@@ -268,6 +268,24 @@ async function sget(key){
   return v ? JSON.parse(v) : null;
 }
 
+// --- "Keep me logged in" session persistence -------------------------
+// This is deliberately a plain, per-device localStorage entry (not synced
+// through sset/sget) — each phone/browser remembers its own signed-in user,
+// the same way a "remember me" cookie would on a normal site.
+const SESSION_KEY = "ms-villa:remembered-session";
+function rememberSession(username){
+  try{ localStorage.setItem(SESSION_KEY, JSON.stringify({ username })); }catch(e){}
+}
+function forgetSession(){
+  try{ localStorage.removeItem(SESSION_KEY); }catch(e){}
+}
+function getRememberedSession(){
+  try{
+    const v = localStorage.getItem(SESSION_KEY);
+    return v ? JSON.parse(v) : null;
+  }catch(e){ return null; }
+}
+
 async function loadCore(){
   let members = await sget("ms-villa:members");
   if(!members){ members = DEFAULT_MEMBERS.map(m=>({...m, password:DEFAULT_PASSWORD})); await sset("ms-villa:members", members); }
