@@ -1,33 +1,36 @@
+
 // netlify/functions/lib/push-helpers.js
 //
-// Shared push-notification helpers used by:
-// - send-notification.js
-// - scheduled-reminders.js
+// Shared Web Push helpers used by both send-notification.js (on-demand
+// pushes triggered from the app) and scheduled-reminders.js (the cron
+// job). Subscriptions are stored in the same Netlify Blobs store that
+// data.js uses for everything else, under one key holding an array.
+//
+// Requires these environment variables (Netlify Site settings ->
+// Environment variables), generated once with `npx web-push generate-vapid-keys`:
+//   VAPID_PUBLIC_KEY
+//   VAPID_PRIVATE_KEY
+//   VAPID_SUBJECT (optional — e.g. "mailto:you@example.com")
+//
+// Until VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY are set, vapidConfigured()
+// returns false and send-notification.js no-ops safely instead of
+// crashing the app.
 
-import webpush from "web-push";
 import { getStore } from "@netlify/blobs";
+import webpush from "web-push";
 
-const SUBS_STORE = "ms-villa-push-subs";
-const SUBS_KEY = "subscriptions";
+const DATA_STORE = "ms-villa-data";
+const SUBSCRIPTIONS_KEY = "ms-villa:push-subscriptions";
 
-/**
- * Check whether VAPID credentials are configured.
- */
-export function vapidConfigured() {
-  return Boolean(
-    process.env.VAPID_PUBLIC_KEY &&
-    process.env.VAPID_PRIVATE_KEY
-  );
+function store() {
+  return getStore(DATA_STORE);
 }
 
-/**
- * Configure Web Push.
- */
-export function configureWebPush() {
-  if (!vapidConfigured()) {
-    throw new Error("VAPID keys are not configured");
-  }
+export function vapidConfigured() {
+  return !!(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY);
+}
 
+function configureWebPush() {
   webpush.setVapidDetails(
     process.env.VAPID_SUBJECT || "mailto:admin@example.com",
     process.env.VAPID_PUBLIC_KEY,
@@ -35,189 +38,70 @@ export function configureWebPush() {
   );
 }
 
-/**
- * Get all saved push subscriptions.
- */
-export async function getSubscriptions() {
-  const store = getStore(SUBS_STORE);
-
-  try {
-    const list = await store.get(SUBS_KEY, {
-      type: "json",
-    });
-
-    return Array.isArray(list) ? list : [];
-  } catch (error) {
-    console.error("Failed to read push subscriptions:", error);
-    return [];
-  }
+async function readSubscriptions() {
+  const list = await store().get(SUBSCRIPTIONS_KEY, { type: "json" }).catch(() => null);
+  return Array.isArray(list) ? list : [];
 }
 
-/**
- * Save or update a push subscription.
- */
+async function writeSubscriptions(list) {
+  await store().setJSON(SUBSCRIPTIONS_KEY, list);
+}
+
+// Saves (or updates) a subscription for a given username. Keyed by
+// endpoint so re-subscribing on the same device/browser doesn't create
+// duplicates.
 export async function saveSubscription(username, subscription) {
-  if (!subscription?.endpoint) {
-    throw new Error("Invalid push subscription");
-  }
-
-  const store = getStore(SUBS_STORE);
-  const list = await getSubscriptions();
-
-  const updatedList = list.filter(
-    (item) =>
-      item?.subscription?.endpoint !== subscription.endpoint
-  );
-
-  updatedList.push({
-    username: username || null,
-    subscription,
-  });
-
-  await store.setJSON(SUBS_KEY, updatedList);
-
-  return {
-    success: true,
-    count: updatedList.length,
-  };
+  if (!subscription || !subscription.endpoint) return;
+  const list = await readSubscriptions();
+  const filtered = list.filter((s) => s.subscription?.endpoint !== subscription.endpoint);
+  filtered.push({ username: username || null, subscription, savedAt: new Date().toISOString() });
+  await writeSubscriptions(filtered);
 }
 
-/**
- * Remove a push subscription by endpoint.
- */
 export async function removeSubscription(endpoint) {
-  if (!endpoint) {
-    return;
-  }
-
-  const store = getStore(SUBS_STORE);
-  const list = await getSubscriptions();
-
-  const updatedList = list.filter(
-    (item) =>
-      item?.subscription?.endpoint !== endpoint
-  );
-
-  await store.setJSON(SUBS_KEY, updatedList);
+  if (!endpoint) return;
+  const list = await readSubscriptions();
+  const filtered = list.filter((s) => s.subscription?.endpoint !== endpoint);
+  await writeSubscriptions(filtered);
 }
 
-/**
- * Send a notification to all stored subscriptions.
- *
- * excludeUsername:
- *   Optional username to skip.
- *
- * data:
- *   Optional additional data sent with the notification.
- */
-export async function sendToAll({
-  title,
-  body,
-  excludeUsername,
-  data = {},
-}) {
+// Sends a push to every stored subscription (optionally skipping one
+// username — typically the person who triggered the action). Prunes
+// subscriptions that the push service reports as gone (410/404), which
+// happens when someone uninstalls the PWA or clears site data.
+export async function sendToAll({ title, body, data, excludeUsername }) {
   if (!vapidConfigured()) {
-    console.warn("VAPID keys are not configured.");
-
-    return {
-      sent: 0,
-      failed: 0,
-      skipped: true,
-      reason: "VAPID keys not configured",
-    };
+    return { sent: 0, failed: 0, reason: "VAPID keys not configured." };
   }
-
   configureWebPush();
 
-  const subscriptions = await getSubscriptions();
+  const list = await readSubscriptions();
+  const targets = list.filter((s) => !excludeUsername || s.username !== excludeUsername);
 
-  if (!subscriptions.length) {
-    return {
-      sent: 0,
-      failed: 0,
-      skipped: false,
-      reason: "No push subscriptions found",
-    };
-  }
-
-  const payload = JSON.stringify({
-    title: title || "Notification",
-    body: body || "",
-    data,
-  });
+  const payload = JSON.stringify({ title, body, data: data || {} });
 
   let sent = 0;
   let failed = 0;
-
-  const staleEndpoints = [];
+  const stale = [];
 
   await Promise.all(
-    subscriptions.map(async (item) => {
-      const username = item?.username;
-      const subscription = item?.subscription;
-
-      if (!subscription?.endpoint) {
-        failed++;
-        return;
-      }
-
-      if (
-        excludeUsername &&
-        username === excludeUsername
-      ) {
-        return;
-      }
-
+    targets.map(async (entry) => {
       try {
-        await webpush.sendNotification(
-          subscription,
-          payload
-        );
-
+        await webpush.sendNotification(entry.subscription, payload);
         sent++;
-      } catch (error) {
+      } catch (err) {
         failed++;
-
-        console.error(
-          `Push notification failed for ${username || "unknown user"}:`,
-          error
-        );
-
-        // 404/410 means the subscription is no longer valid.
-        if (
-          error?.statusCode === 404 ||
-          error?.statusCode === 410
-        ) {
-          staleEndpoints.push(subscription.endpoint);
+        if (err.statusCode === 404 || err.statusCode === 410) {
+          stale.push(entry.subscription.endpoint);
         }
       }
     })
   );
 
-  // Remove expired subscriptions.
-  if (staleEndpoints.length > 0) {
-    const store = getStore(SUBS_STORE);
-
-    const currentSubscriptions =
-      await getSubscriptions();
-
-    const freshSubscriptions =
-      currentSubscriptions.filter(
-        (item) =>
-          !staleEndpoints.includes(
-            item?.subscription?.endpoint
-          )
-      );
-
-    await store.setJSON(
-      SUBS_KEY,
-      freshSubscriptions
-    );
+  if (stale.length) {
+    const remaining = list.filter((s) => !stale.includes(s.subscription?.endpoint));
+    await writeSubscriptions(remaining);
   }
 
-  return {
-    sent,
-    failed,
-    skipped: false,
-  };
+  return { sent, failed, total: targets.length };
 }
